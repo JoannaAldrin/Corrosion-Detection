@@ -1,142 +1,112 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
-import requests
-import matplotlib.pyplot as plt
+import torch, numpy as np, pandas as pd, requests, sys, os
+import plotly.graph_objects as go
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "model"))
+from common import CorrosionLSTM, ALL_FEATURES
 
-st.set_page_config(page_title="Abu Dhabi Pipeline Corrosion Digital Twin", layout="wide")
+st.set_page_config(page_title="Gulf Corrosion Twin", page_icon="⚠", layout="wide")
 
-# Function to fetch live weather from Open-Meteo API (Abu Dhabi Coordinates)
-@st.cache_data(ttl=600)
-def get_live_abudhabi_weather():
-    try:
-        url = "https://api.open-meteo.com/v1/forecast?latitude=24.4539&longitude=54.3773&current=temperature_2m,relative_humidity_2m"
-        res = requests.get(url, timeout=5).json()
-        temp = res['current']['temperature_2m']
-        rh = res['current']['relative_humidity_2m']
-        return temp, rh, True
-    except Exception:
-        return 38.5, 62.0, False # Fallback values
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.stApp { background: radial-gradient(circle at 10% 0%, #0f2b36 0%, #081418 55%, #060c0e 100%); color: #E8F0F2; }
+section[data-testid="stSidebar"] { background: #0A1C22; border-right: 1px solid #16343D; }
+.kpi-card { background: linear-gradient(145deg, #0E2A33, #0A1E24); border: 1px solid #1C4450;
+  border-radius: 14px; padding: 20px 22px; box-shadow: 0 4px 18px rgba(0,0,0,0.35); }
+.kpi-label { font-size: 11px; letter-spacing: 2px; color: #6FA8B5; text-transform: uppercase; font-weight: 600; }
+.kpi-value { font-size: 30px; font-weight: 800; color: #F4F7F8; font-family: 'JetBrains Mono', monospace; margin-top: 4px; }
+.section-tag { font-size: 12px; letter-spacing: 2px; color: #E4572E; font-weight: 700; text-transform: uppercase; margin: 18px 0 6px 0; }
+.badge { display: inline-block; padding: 5px 14px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+.badge-low { background: rgba(39,194,139,0.15); color: #27C28B; border: 1px solid #27C28B; }
+.badge-moderate { background: rgba(230,183,60,0.15); color: #E6B73C; border: 1px solid #E6B73C; }
+.badge-elevated { background: rgba(228,87,46,0.15); color: #E4572E; border: 1px solid #E4572E; }
+</style>
+""", unsafe_allow_html=True)
 
-# Load Telemetry Data
-@st.cache_data
-def load_data():
-    df = pd.read_csv("data/simulated_corrosion.csv")
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    return df
+@st.cache_resource
+def load_model():
+    model = CorrosionLSTM()
+    model.load_state_dict(torch.load("model/pinn_lstm_model.pth", map_location="cpu"))
+    model.eval()
+    return model
 
-df = load_data()
+@st.cache_data(ttl=300)  # 5 min cache -- short enough to stay "live"
+def fetch_live_weather(lat=25.2048, lon=55.2708):  # Dubai coordinates
+    """
+    Uses Open-Meteo's `current=` parameter, which returns the actual
+    current reading directly -- NOT the hourly forecast array. Indexing
+    the hourly array (e.g. temperature_2m[-1]) returns a forecasted value
+    up to 48 hours out, which is the bug that caused earlier mismatches.
+    """
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+        f"&current=temperature_2m,relative_humidity_2m&timezone=auto"
+    )
+    r = requests.get(url, timeout=8)
+    r.raise_for_status()
+    current = r.json()["current"]
+    return current["temperature_2m"], current["relative_humidity_2m"]
 
-st.title("🛡️ Abu Dhabi Pipeline Corrosion Digital Twin")
-st.markdown("Physics-Informed Monitoring & Risk Assessment Engine Calibrated to Arabian Gulf Field Studies.")
+def risk_badge(rate):
+    if rate < 0.15: return "LOW", "low"
+    if rate < 0.35: return "MODERATE", "moderate"
+    return "ELEVATED", "elevated"
 
-# Sidebar Live Weather Integration
-live_temp, live_rh, weather_success = get_live_abudhabi_weather()
-st.sidebar.header("🌐 Live Abu Dhabi Telemetry")
-if weather_success:
-    st.sidebar.success("Connected to Live Open-Meteo API")
-else:
-    st.sidebar.warning("Using Offline Calibration Metrics")
+st.title("Gulf Corrosion Digital Twin")
+st.caption("Separate early-warning tracks for external (environmental) and internal (microbial) corrosion")
 
-st.sidebar.metric("Live Ambient Temp (°C)", f"{live_temp:.1f} °C")
-st.sidebar.metric("Live Relative Humidity (%)", f"{live_rh:.1f} %")
+with st.sidebar:
+    st.markdown('<div class="section-tag">External / Surface Conditions</div>', unsafe_allow_html=True)
+    live = st.toggle("Enable Live Telemetry Feed", value=True)
+    if live:
+        try:
+            temp, hum = fetch_live_weather()
+            st.success(f"Live: {temp:.1f}°C / {hum:.0f}% RH")
+        except Exception as e:
+            st.warning(f"Live feed unavailable ({e}) — using manual input.")
+            live = False
+    if not live:
+        temp = st.slider("Temperature (°C)", 10.0, 55.0, 34.0)
+        hum = st.slider("Humidity (%)", 0.0, 100.0, 45.0)
+    salinity = st.slider("Soil / Water Salinity (%)", 0.5, 5.0, 2.5) / 100
+    ph = st.slider("pH", 5.5, 9.0, 7.4)
 
-# Main Navigation Tabs
-tab1, tab2, tab3 = st.tabs([
-    "📡 Automated Live Telemetry", 
-    "📅 Monthly Risk Breakdown", 
-    "🧪 What-If Scenario Planner"
-])
+    st.markdown('<div class="section-tag">Internal / Fluid Conditions</div>', unsafe_allow_html=True)
+    internal_temp = st.slider("Internal Fluid Temp (°C)", 15.0, 75.0, 45.0)
+    water_cut = st.slider("Water Cut (%)", 0.0, 95.0, 30.0)
+    flow_velocity = st.slider("Flow Velocity (m/s)", 0.05, 4.0, 1.5)
 
-# ==========================================
-# TAB 1: AUTOMATED LIVE MONITORING
-# ==========================================
-with tab1:
-    st.subheader("Automated Operational Early Warning Engine")
-    
-    latest = df.iloc[-1]
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Current Temp (°C)", f"{latest['temperature_C']:.1f}")
-    col2.metric("Relative Humidity (%)", f"{latest['humidity_pct']:.1f}")
-    col3.metric("Salinity (g/L)", f"{latest['salinity_gL']:.1f}")
-    col4.metric("SRB Factor", f"{latest['srb_multiplier']:.2f}x")
-    
-    st.write("---")
-    
-    # Automated Risk Decision Logic
-    rate = latest['corrosion_rate']
-    srb = latest['srb_multiplier']
-    
-    if rate > 0.06 or srb > 2.5:
-        st.error("🚨 **CRITICAL ALERT: Microbially Influenced Corrosion (MIC) Threat**")
-        st.caption("High Sulfate-Reducing Bacteria (SRB) activity indicates severe localized pitting risks.")
-    elif rate > 0.035:
-        st.warning("⚠️ **WARNING: Elevated Thermal Oxidation Risk**")
-        st.caption("Peak desert temperature and high salinity driving accelerated wall thinning.")
-    else:
-        st.success("✅ **SYSTEM HEALTHY: Operating Within Safe Physics Bounds**")
-        st.caption("Degradation rates remain within baseline thresholds (<0.035 mm/year).")
-        
-    st.write("### 24-Hour Rolling Forecast")
-    st.line_chart(df.set_index('timestamp')[['corrosion_rate', 'corrosion_depth_mm']].tail(24))
+window = np.tile(
+    [temp, hum, salinity, ph, internal_temp, water_cut, flow_velocity], (30, 1)
+).astype(np.float32)
+x = torch.from_numpy(window).unsqueeze(0)
 
-# ==========================================
-# TAB 2: MONTHLY CORROSION RISK BREAKDOWN
-# ==========================================
-with tab2:
-    st.subheader("📅 Calendar Month Risk Segregation (Professor Feedback Implementation)")
-    st.markdown("Aggregation of 8,760 hourly timesteps into calendar months to identify seasonal risk windows in the UAE.")
-    
-    # Group by month maintaining chronological order
-    monthly_agg = df.groupby(['month_num', 'month'], as_index=False).agg({
-        'corrosion_rate': 'mean',
-        'temperature_C': 'mean',
-        'humidity_pct': 'mean',
-        'srb_multiplier': 'mean'
-    }).sort_values('month_num')
-    
-    # Highlight Peak Month
-    peak_row = monthly_agg.loc[monthly_agg['corrosion_rate'].idxmax()]
-    
-    st.info(f"🔥 **Peak Risk Period:** **{peak_row['month']}** exhibits the highest mean corrosion rate (**{peak_row['corrosion_rate']:.4f} mm/yr**) driven by mean temperatures of **{peak_row['temperature_C']:.1f}°C**.")
-    
-    # Monthly Bar Chart
-    fig, ax1 = plt.subplots(figsize=(10, 4))
-    
-    colors = ['#ff4b4b' if m == peak_row['month'] else '#1f77b4' for m in monthly_agg['month']]
-    ax1.bar(monthly_agg['month'], monthly_agg['corrosion_rate'], color=colors, alpha=0.8)
-    ax1.set_ylabel("Mean Corrosion Rate (mm/yr)", color="#1f77b4")
-    plt.xticks(rotation=45)
-    
-    ax2 = ax1.twinx()
-    ax2.plot(monthly_agg['month'], monthly_agg['temperature_C'], color='orange', marker='o', linewidth=2, label="Temp (°C)")
-    ax2.set_ylabel("Mean Temp (°C)", color="orange")
-    
-    st.pyplot(fig)
-    
-    # Data Table
-    st.write("### Monthly Environmental Summary Table")
-    st.dataframe(monthly_agg[['month', 'corrosion_rate', 'temperature_C', 'humidity_pct', 'srb_multiplier']].style.highlight_max(subset=['corrosion_rate'], color='#ffcccc'))
+model = load_model()
+with torch.no_grad():
+    pred = model(x).squeeze(0).numpy()
+ext_depth, int_depth = float(pred[0]), float(pred[1])
+ext_rate, int_rate = ext_depth / 2.0, int_depth / 2.0
 
-# ==========================================
-# TAB 3: WHAT-IF SCENARIO PLANNER
-# ==========================================
-with tab3:
-    st.subheader("🧪 Stress Testing & Scenario Planner")
-    st.caption("Manually adjust environmental inputs to simulate extreme out-of-bounds desert heat or microbial blooms.")
-    
-    cA, cB = st.columns(2)
-    with cA:
-        s_temp = st.slider("Simulated Temp (°C)", 15.0, 55.0, 45.0)
-        s_rh = st.slider("Simulated Humidity (%)", 10.0, 100.0, 75.0)
-    with cB:
-        s_sal = st.slider("Simulated Salinity (g/L)", 30.0, 50.0, 44.0)
-        s_srb = st.slider("Simulated SRB Multiplier", 1.0, 4.0, 2.8)
-        
-    # Arrhenius Calculation
-    Ea, R = 38000.0, 8.314
-    arr = np.exp(-Ea / (R * (s_temp + 273.15))) / np.exp(-Ea / (R * 298.15))
-    sim_rate = 0.056 * arr * (1.0 + (s_rh / 100.0) * 0.25) * (s_sal / 43.5) * s_srb
-    
-    st.metric("Simulated Corrosion Rate", f"{sim_rate:.4f} mm/year")
+st.markdown('<div class="section-tag">External Corrosion (Surface)</div>', unsafe_allow_html=True)
+c1, c2, c3 = st.columns(3)
+level, cls = risk_badge(ext_rate)
+c1.markdown(f'<div class="kpi-card"><div class="kpi-label">Predicted Depth</div><div class="kpi-value">{ext_depth:.3f} mm</div></div>', unsafe_allow_html=True)
+c2.markdown(f'<div class="kpi-card"><div class="kpi-label">Annual Rate</div><div class="kpi-value">{ext_rate:.3f} mm/yr</div></div>', unsafe_allow_html=True)
+c3.markdown(f'<div class="kpi-card"><div class="kpi-label">Risk Rating</div><div class="badge badge-{cls}">{level}</div></div>', unsafe_allow_html=True)
+
+st.markdown('<div class="section-tag">Internal Corrosion (Microbial / MIC)</div>', unsafe_allow_html=True)
+c4, c5, c6 = st.columns(3)
+level2, cls2 = risk_badge(int_rate)
+c4.markdown(f'<div class="kpi-card"><div class="kpi-label">Predicted Depth</div><div class="kpi-value">{int_depth:.3f} mm</div></div>', unsafe_allow_html=True)
+c5.markdown(f'<div class="kpi-card"><div class="kpi-label">Annual Rate</div><div class="kpi-value">{int_rate:.3f} mm/yr</div></div>', unsafe_allow_html=True)
+c6.markdown(f'<div class="kpi-card"><div class="kpi-label">Risk Rating</div><div class="badge badge-{cls2}">{level2}</div></div>', unsafe_allow_html=True)
+
+st.markdown("---")
+days = np.arange(0, 365)
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=days, y=ext_depth*(days/30)**0.9, name="External", line=dict(color="#6FA8B5", width=3)))
+fig.add_trace(go.Scatter(x=days, y=int_depth*(days/30)**0.9, name="Internal (MIC)", line=dict(color="#E4572E", width=3)))
+fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                   height=380, xaxis_title="Days ahead", yaxis_title="Corrosion depth (mm)", legend=dict(orientation="h"))
+st.plotly_chart(fig, use_container_width=True)

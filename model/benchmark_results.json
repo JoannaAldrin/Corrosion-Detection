@@ -1,0 +1,11 @@
+{
+  "baseline": {
+    "rmse_external": 0.6670933365821838,
+    "rmse_internal": 1.4993149042129517
+  },
+  "physics_informed": {
+    "rmse_external": 0.5367916226387024,
+    "rmse_internal": 1.1371243000030518
+  },
+  "improvement_pct_external": 19.53
+}
