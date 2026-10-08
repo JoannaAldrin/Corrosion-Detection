@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "model"))
 from common import CorrosionLSTM, ALL_FEATURES
 
-st.set_page_config(page_title="Gulf Corrosion Twin", page_icon="⚠", layout="wide")
+st.set_page_config(page_title="Gulf Corrosion Twin", layout="wide")
 
 st.markdown("""
 <style>
@@ -33,12 +33,6 @@ def load_model():
 
 @st.cache_data(ttl=300)  # 5 min cache -- short enough to stay "live"
 def fetch_live_weather(lat=25.2048, lon=55.2708):  # Dubai coordinates
-    """
-    Uses Open-Meteo's `current=` parameter, which returns the actual
-    current reading directly -- NOT the hourly forecast array. Indexing
-    the hourly array (e.g. temperature_2m[-1]) returns a forecasted value
-    up to 48 hours out, which is the bug that caused earlier mismatches.
-    """
     url = (
         f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
         f"&current=temperature_2m,relative_humidity_2m&timezone=auto"
@@ -59,6 +53,7 @@ st.caption("Separate early-warning tracks for external (environmental) and inter
 with st.sidebar:
     st.markdown('<div class="section-tag">External / Surface Conditions</div>', unsafe_allow_html=True)
     live = st.toggle("Enable Live Telemetry Feed", value=True)
+    
     if live:
         try:
             temp, hum = fetch_live_weather()
@@ -66,9 +61,15 @@ with st.sidebar:
         except Exception as e:
             st.warning(f"Live feed unavailable ({e}) — using manual input.")
             live = False
-    if not live:
+
+    # Disabled sliders when Live Feed is active; interactive sliders when manual
+    if live:
+        st.slider("Temperature (°C)", 10.0, 55.0, float(temp), disabled=True)
+        st.slider("Humidity (%)", 0.0, 100.0, float(hum), disabled=True)
+    else:
         temp = st.slider("Temperature (°C)", 10.0, 55.0, 34.0)
         hum = st.slider("Humidity (%)", 0.0, 100.0, 45.0)
+
     salinity = st.slider("Soil / Water Salinity (%)", 0.5, 5.0, 2.5) / 100
     ph = st.slider("pH", 5.5, 9.0, 7.4)
 
@@ -108,5 +109,5 @@ fig = go.Figure()
 fig.add_trace(go.Scatter(x=days, y=ext_depth*(days/30)**0.9, name="External", line=dict(color="#6FA8B5", width=3)))
 fig.add_trace(go.Scatter(x=days, y=int_depth*(days/30)**0.9, name="Internal (MIC)", line=dict(color="#E4572E", width=3)))
 fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                   height=380, xaxis_title="Days ahead", yaxis_title="Corrosion depth (mm)", legend=dict(orientation="h"))
+                  height=380, xaxis_title="Days ahead", yaxis_title="Corrosion depth (mm)", legend=dict(orientation="h"))
 st.plotly_chart(fig, use_container_width=True)
